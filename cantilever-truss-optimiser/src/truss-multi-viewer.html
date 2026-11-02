@@ -1,0 +1,421 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Truss Multi Viewer v4</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:12px;color:#111}
+  #bar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+  .grid{display:inline-grid;gap:0}
+  .pane{position:relative;border:1px solid #ddd;box-sizing:border-box}
+  canvas{display:block;width:100%;height:100%;background:#fff;touch-action:none}
+  .hud{position:absolute;left:6px;bottom:6px;background:rgba(255,255,255,.9);padding:2px 6px;border-radius:4px;font-size:12px;border:1px solid #eee}
+  .btnLoad{position:absolute;right:6px;top:6px;font-size:12px;padding:4px 8px}
+  label,button,input,select{font-size:13px;padding:6px 8px}
+  .muted{color:#666;font-size:12px}
+</style>
+</head>
+<body>
+<h3>Truss Multi Viewer v4</h3>
+<div id="bar">
+  <label>Layout
+    <select id="layout">
+      <option value="4" selected>2×2 (4)</option>
+      <option value="9">3×3 (9)</option>
+    </select>
+  </label>
+  <label>Pane W <input type="number" id="paneW" value="420" min="200" max="1000" step="10" style="width:80px;"></label>
+  <label>Pane H <input type="number" id="paneH" value="280" min="160" max="800" step="10" style="width:80px;"></label>
+  <label><input type="checkbox" id="colorBySR"> Color by stress ratio</label>
+  <label>σ<sub>allow</sub> <input type="number" id="sigmaAllow" value="250" step="10" style="width:80px;"> N/mm²</label>
+  <label style="border:1px solid #ccc;padding:4px 6px;border-radius:4px;cursor:pointer;">
+    Load multiple JSON
+    <input id="multiLoad" type="file" accept="application/json" multiple style="display:none;">
+  </label>
+  <span class="muted">Pan: drag · Zoom: wheel (synced)</span>
+</div>
+
+<div id="grid" class="grid"></div>
+
+<script>
+(() => {
+  const grid=document.getElementById('grid');
+  const layoutSel=document.getElementById('layout');
+  const colorBySR=document.getElementById('colorBySR');
+  const sigmaAllowEl=document.getElementById('sigmaAllow');
+  const paneWEl=document.getElementById('paneW');
+  const paneHEl=document.getElementById('paneH');
+  const multiLoad=document.getElementById('multiLoad');
+
+  const AREAS=[27.7,37.6,46.9,58.7,73.2],
+        BS=[9.5,12.5,15.9,16.0,19.5],
+        SCOREC=[76,102,127,159,199]; // score per mm
+  const L0=5.0,SIG0=250.0,c_fit=27.02104605374878,k_fit=0.17903009849966303;
+  function sigmaCR(Lb){
+    if(Lb<=L0) return SIG0;
+    if(Lb<12.5){
+      const m=(180-SIG0)/(12.5-L0), b=SIG0-m*L0;
+      return m*Lb+b;
+    }
+    return c_fit+(180-c_fit)*Math.exp(-k_fit*(Lb-12.5));
+  }
+  function ratioColor(r){
+    if(r<=0.90) return '#0a0';
+    if(r<=1.00) return '#ff8c00';
+    return '#b00020';
+  }
+
+  const sharedView={scale:1, tx:30, ty:30};
+  const MIN_SCALE=0.25, MAX_SCALE=4;
+
+  const viewers=[];
+
+  function toScreen(x,y){
+    return {x:x*sharedView.scale+sharedView.tx,y:y*sharedView.scale+sharedView.ty};
+  }
+
+  function totalScore(model){
+    let tot=0;
+    for(const m of model.members){
+      const t=Math.max(1,Math.min(5,m.t||3));
+      const a=model.pins[m.i], b=model.pins[m.k];
+      const L=Math.hypot(b.x-a.x,b.y-a.y);
+      tot+=L*SCOREC[t-1];
+    }
+    return tot;
+  }
+
+  function solveOnce(model){
+    const {pins,members}=model;
+    const j=pins.length, m=members.length;
+    const reactionMap=[];
+    for(let i=0;i<j;i++){
+      const s=pins[i].support;
+      if(s==='pin'){ reactionMap.push([i,'x']); reactionMap.push([i,'y']); }
+      else if(s==='roller-x'){ reactionMap.push([i,'x']); }
+      else if(s==='roller-y'){ reactionMap.push([i,'y']); }
+    }
+    const r=reactionMap.length;
+    if(m+r!==2*j) return null;
+    const rows=2*j, cols=m+r;
+    const A=Array.from({length:rows},()=>new Array(cols).fill(0));
+    const b=new Array(rows).fill(0);
+    for(let i=0;i<j;i++){
+      b[2*i]=-(pins[i].load?.x||0);
+      b[2*i+1]=+(pins[i].load?.y||0);
+    }
+    for(let mi=0;mi<m;mi++){
+      const {i,k}=members[mi];
+      const xi=pins[i].x, yi=pins[i].y,
+            xk=pins[k].x, yk=pins[k].y;
+      const L=Math.hypot(xk-xi,yk-yi);
+      if(L<1e-9) return null;
+      const cx=(xk-xi)/L, cy=(yk-yi)/L;
+      A[2*i][mi]+=cx; A[2*i+1][mi]+=cy;
+      A[2*k][mi]-=cx; A[2*k+1][mi]-=cy;
+    }
+    for(let ri=0;ri<r;ri++){
+      const [pi,dir]=reactionMap[ri], c=m+ri;
+      if(dir==='x') A[2*pi][c]=1;
+      else A[2*pi+1][c]=1;
+    }
+    function rank(M,t=1e-12){
+      const N=M.map(r=>r.slice());
+      const n=N.length, mcols=N[0].length;
+      let rnk=0,c=0;
+      while(rnk<n && c<mcols){
+        let piv=rnk,mv=Math.abs(N[rnk][c]);
+        for(let i=rnk+1;i<n;i++){
+          const v=Math.abs(N[i][c]);
+          if(v>mv){mv=v;piv=i;}
+        }
+        if(mv<=t){ c++; continue; }
+        if(piv!==rnk){
+          const tmp=N[rnk]; N[rnk]=N[piv]; N[piv]=tmp;
+        }
+        const pv=N[rnk][c];
+        for(let i=rnk+1;i<n;i++){
+          const f=N[i][c]/pv;
+          if(Math.abs(f)<=t) continue;
+          for(let j=c;j<mcols;j++) N[i][j]-=f*N[rnk][j];
+        }
+        rnk++; c++;
+      }
+      return rnk;
+    }
+    if(rank(A,1e-12)<A.length) return null;
+
+    const M=A.map((row,i)=>row.concat([b[i]]));
+    const nrows=A.length;
+    for(let k=0;k<nrows;k++){
+      let mv=Math.abs(M[k][k]), piv=k;
+      for(let i=k+1;i<nrows;i++){
+        const v=Math.abs(M[i][k]);
+        if(v>mv){
+          mv=v;
+          const tmp=M[k]; M[k]=M[i]; M[i]=tmp;
+        }
+      }
+      if(Math.abs(M[k][k])<1e-12) return null;
+      for(let i=k+1;i<nrows;i++){
+        const f=M[i][k]/M[k][k];
+        for(let j=k;j<=nrows;j++) M[i][j]-=f*M[k][j];
+      }
+    }
+    const x=new Array(nrows).fill(0);
+    for(let i=nrows-1;i>=0;i--){
+      let s=M[i][nrows];
+      for(let j=i+1;j<nrows;j++) s-=M[i][j]*x[j];
+      x[i]=s/M[i][i];
+    }
+    return x.slice(0,m);
+  }
+
+  function clearSlot(i){
+    const v=viewers[i];
+    if(!v) return;
+    v.model=null;
+    v.forces=null;
+    v.score=0;
+    drawPane(i);
+  }
+
+  async function loadFileIntoSlot(file, idx){
+    const v=viewers[idx];
+    if(!v) return;
+    if(!file){
+      clearSlot(idx);
+      return;
+    }
+    try{
+      const txt=await file.text();
+      const data=JSON.parse(txt);
+      const model={
+        pins:data.pins.map(p=>({
+          x:+p.x||0,
+          y:+p.y||0,
+          support:p.support||null,
+          load:{x:+(p.load?.x||0),y:+(p.load?.y||0)}
+        })),
+        members:data.members.map(m=>({i:+m.i,k:+m.k,t:+(m.t||3)}))
+      };
+      const forces=solveOnce(model);
+      const score=totalScore(model);
+      v.model=model;
+      v.forces=forces || new Array(model.members.length).fill(0);
+      v.score=score;
+      drawPane(idx);
+    }catch(err){
+      console.error('Failed to load slot', idx, err);
+      v.model=null;
+      v.forces=null;
+      v.score=0;
+      drawPane(idx);
+    }
+  }
+
+  function drawPane(i){
+    const pane=viewers[i];
+    const c=pane.canvas, ctx=pane.ctx;
+    ctx.clearRect(0,0,c.width,c.height);
+    if(!pane.model){
+      ctx.fillStyle='#888';
+      ctx.font='12px sans-serif';
+      ctx.fillText('Click “Load” or use “Load multiple JSON”…',10,18);
+      pane.wrap.querySelector('.hud').textContent='Score: –';
+      return;
+    }
+    const {pins,members}=pane.model;
+    const forces=pane.forces||[];
+
+    function memberLength(mi){
+      const m=members[mi], a=pins[m.i], b=pins[m.k];
+      return Math.hypot(b.x-a.x,b.y-a.y);
+    }
+    function stress(mi){
+      const t=(members[mi].t||3);
+      const A=AREAS[Math.max(1,Math.min(5,t))-1];
+      return forces[mi]/A;
+    }
+    function sigmaCr(mi){
+      if(forces[mi]>=0) return null;
+      const t=(members[mi].t||3);
+      const b=BS[Math.max(1,Math.min(5,t))-1];
+      const L=memberLength(mi);
+      const Lb=(b>0)?(L/b):1e9;
+      return sigmaCR(Lb);
+    }
+    function stroke(mi){
+      const F=forces[mi];
+      if(!colorBySR.checked){
+        if(F<0){
+          const scr=sigmaCr(mi);
+          const s=Math.abs(stress(mi)||0);
+          if(scr!==null && s>scr) return '#d81b60';
+        }
+        if(Math.abs(F)<1e-6) return '#888';
+        return (F>0)?'#0a0':'#b00020';
+      }else{
+        const s=Math.abs(stress(mi)||0);
+        if(F<0){
+          const scr=sigmaCr(mi)||Infinity;
+          const r=s/Math.max(1e-6,scr);
+          return ratioColor(r);
+        }else{
+          const sa=Math.max(1e-6, parseFloat(sigmaAllowEl.value)||250);
+          const r=s/sa;
+          return ratioColor(r);
+        }
+      }
+    }
+
+    for(let mi=0;mi<members.length;mi++){
+      const m=members[mi], a=pins[m.i], b=pins[m.k];
+      const sa=toScreen(a.x,a.y), sb=toScreen(b.x,b.y);
+      ctx.lineWidth=3;
+      ctx.strokeStyle=stroke(mi);
+      ctx.beginPath();
+      ctx.moveTo(sa.x,sa.y);
+      ctx.lineTo(sb.x,sb.y);
+      ctx.stroke();
+    }
+    for(let j=0;j<pins.length;j++){
+      const p=pins[j];
+      const s=toScreen(p.x,p.y);
+      ctx.beginPath();
+      ctx.arc(s.x,s.y,4,0,Math.PI*2);
+      ctx.fillStyle=(p.support==='pin')?'blue':(p.support==='roller-y')?'orange':(p.support==='roller-x')?'#6aa7ff':'black';
+      ctx.fill();
+    }
+    pane.wrap.querySelector('.hud').textContent='Score: '+(pane.score?.toFixed(1) || '–');
+  }
+
+  function redrawAll(){
+    for(let i=0;i<viewers.length;i++) drawPane(i);
+  }
+
+  function setupPaneInteractions(canvas){
+    let dragging=false, last={x:0,y:0};
+    canvas.addEventListener('mousedown',e=>{
+      dragging=true;
+      last={x:e.clientX,y:e.clientY};
+    });
+    window.addEventListener('mouseup',()=>{ dragging=false; });
+    canvas.addEventListener('mousemove',e=>{
+      if(!dragging) return;
+      const dx=e.clientX-last.x, dy=e.clientY-last.y;
+      last={x:e.clientX,y:e.clientY};
+      sharedView.tx += dx;
+      sharedView.ty += dy;
+      redrawAll();
+    });
+    canvas.addEventListener('wheel',e=>{
+      e.preventDefault();
+      const rect=canvas.getBoundingClientRect();
+      const cx=e.clientX-rect.left, cy=e.clientY-rect.top;
+      const factor=(e.deltaY<0)?1.1:1/1.1;
+      const newScale=Math.max(MIN_SCALE, Math.min(MAX_SCALE, sharedView.scale*factor));
+      const s=newScale/sharedView.scale;
+      sharedView.tx = cx - s*(cx - sharedView.tx);
+      sharedView.ty = cy - s*(cy - sharedView.ty);
+      sharedView.scale=newScale;
+      redrawAll();
+    },{passive:false});
+  }
+
+  function setLayout(n){
+    const cols=(n==9)?3:2;
+    grid.style.gridTemplateColumns=`repeat(${cols}, auto)`;
+    grid.innerHTML='';
+    viewers.length=0;
+
+    const w=parseInt(paneWEl.value,10)||420;
+    const h=parseInt(paneHEl.value,10)||280;
+
+    for(let i=0;i<n;i++){
+      const wrap=document.createElement('div');
+      wrap.className='pane';
+      wrap.style.width=w+'px';
+      wrap.style.height=h+'px';
+
+      const c=document.createElement('canvas');
+      c.width=w; c.height=h;
+
+      const hud=document.createElement('div');
+      hud.className='hud';
+      hud.textContent='Score: –';
+
+      const btn=document.createElement('button');
+      btn.className='btnLoad';
+      btn.textContent='Load';
+
+      const file=document.createElement('input');
+      file.type='file';
+      file.accept='application/json';
+      file.style.display='none';
+
+      wrap.appendChild(c);
+      wrap.appendChild(btn);
+      wrap.appendChild(hud);
+      wrap.appendChild(file);
+      grid.appendChild(wrap);
+
+      const ctx=c.getContext('2d');
+      setupPaneInteractions(c);
+
+      const viewer={wrap,canvas:c,ctx,model:null,forces:null,score:0};
+      viewers.push(viewer);
+
+      btn.addEventListener('click',()=>file.click());
+      file.addEventListener('change',(e)=>{
+        const f=e.target.files[0];
+        e.target.value='';
+        if(!f) return;
+        loadFileIntoSlot(f, i);
+      });
+
+      drawPane(i);
+    }
+  }
+
+  function resizePanes(){
+    const w=parseInt(paneWEl.value,10)||420;
+    const h=parseInt(paneHEl.value,10)||280;
+    for(const v of viewers){
+      if(!v) continue;
+      v.wrap.style.width=w+'px';
+      v.wrap.style.height=h+'px';
+      v.canvas.width=w;
+      v.canvas.height=h;
+    }
+    redrawAll();
+  }
+
+  // Multi-load handler: overwrite all, cap to 4 or 9
+  multiLoad.addEventListener('change',(e)=>{
+    const files=Array.from(e.target.files||[]);
+    e.target.value='';
+    if(!files.length) return;
+    const maxSlots = parseInt(layoutSel.value,10) || 4; // 4 or 9
+    const useFiles = files.slice(0,maxSlots);
+
+    // Clear all slots first
+    for(let i=0;i<viewers.length;i++) clearSlot(i);
+
+    // Load into first slots
+    useFiles.forEach((file, idx)=>{
+      if(idx<viewers.length) loadFileIntoSlot(file, idx);
+    });
+  });
+
+  colorBySR.addEventListener('change', redrawAll);
+  sigmaAllowEl.addEventListener('change', redrawAll);
+  layoutSel.addEventListener('change',()=>setLayout(parseInt(layoutSel.value,10)));
+  paneWEl.addEventListener('change',resizePanes);
+  paneHEl.addEventListener('change',resizePanes);
+
+  setLayout(4);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+Thumbs.db
+# Never commit exam papers (copyrighted) or personal app data
+past-paper-app/src/1P*/
+past-paper-app/src/QP_split/
+past-paper-app/src/questions.json
+past-paper-app/**/*.pdf
+*.pdf.bak

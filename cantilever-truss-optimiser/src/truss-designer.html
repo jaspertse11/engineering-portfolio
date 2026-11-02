@@ -1,0 +1,1085 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Truss Designer — v25</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:12px;color:#111}
+  canvas{border:1px solid #ccc;background:#fff;display:block;margin-bottom:8px;touch-action:none;cursor:grab}
+  canvas.dragging{cursor:grabbing}
+  button,label,input,select{font-size:13px;padding:6px 8px}
+  .muted{color:#666;font-size:12px;margin-bottom:6px}
+  .hsep{width:1px;height:28px;background:#e6e6e6;margin:0 6px}
+  table{width:100%;border-collapse:collapse}
+  th,td{border:1px solid #eee;padding:6px;text-align:left;font-size:13px}
+  th{background:#fafafa}
+  h4{margin:6px 0}
+  #topbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+  #statusWrap{display:flex;gap:12px;align-items:center;margin-left:auto}
+  #optbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
+</style>
+</head>
+<body>
+<h3>Truss Designer — v25</h3>
+<div class="muted">
+  <b>Ctrl+Click</b> empty: add joint · <b>Left-drag</b> joint: move
+  (continuous; if “Block failing moves” is ON, moves that cause failure are blocked) ·
+  <b>Drag empty</b>: pan · <b>Scroll</b>: zoom at cursor ·
+  <b>Alt+Click</b> joint: cycle support · <b>Shift+Click</b> two joints: toggle member ·
+  Right-click joint: set vertical load (+down).
+</div>
+
+<div id="topbar">
+  <button id="auto">Auto Generate Members</button>
+  <button id="solve">Solve</button>
+  <button id="deleteSel">Delete Selected Joints</button>
+  <button id="clearKeep">Clear (keep supports & loads)</button>
+  <button id="saveJson">Save JSON</button>
+  <label for="loadJson" style="border:1px solid #ccc;padding:6px 8px;border-radius:4px;cursor:pointer;">
+    Load JSON <input id="loadJson" type="file" accept="application/json" style="display:none;">
+  </label>
+  <span class="hsep"></span>
+  <label><input type="checkbox" id="colorBySR" checked> Color by stress ratio</label>
+  <label>σ<sub>allow</sub> <input type="number" id="sigmaAllow" value="250" step="10" style="width:72px;"> N/mm²</label>
+  <span class="hsep"></span>
+  <label><input type="checkbox" id="blockGuard"> Block failing moves</label>
+  <div id="statusWrap">
+    <div id="status">Status: ready</div>
+    <div id="statusScore">Score: 0.0</div>
+  </div>
+</div>
+
+<canvas id="cv" width="1100" height="450"></canvas>
+
+<div id="optbar">
+  <button id="optRun">Optimize</button>
+  <label>Preset
+    <select id="optPreset">
+      <option value="fast">Fast</option>
+      <option value="refine">Refine</option>
+      <option value="thorough">Thorough</option>
+      <option value="max">Max</option>
+    </select>
+  </label>
+  <label>Joints <input id="optJoints" type="number" value="6" min="4" max="20" style="width:64px;" readonly></label>
+  <label>Pop λ <input id="optPop" type="number" value="24" min="6" max="200" step="1" style="width:64px;"></label>
+  <label>Parents μ <input id="optParents" type="number" value="8" min="2" max="100" step="1" style="width:72px;"></label>
+  <label>Iterations <input id="optIters" type="number" value="200" min="1" max="5000" step="1" style="width:84px;"></label>
+  <label>Stagnation % <input id="optStagPct" type="number" value="40" min="5" max="100" step="1" style="width:64px;"></label>
+  <label>Pos step <input id="optStep" type="number" value="12" min="1" max="100" step="1" style="width:64px;"></label>
+  <label>Size mut p <input id="optSizeP" type="number" value="0.15" min="0" max="1" step="0.01" style="width:64px;"></label>
+  <label>Cross p <input id="optCrossP" type="number" value="0.60" min="0" max="1" step="0.05" style="width:64px;"></label>
+  <label><input type="checkbox" id="fastOpt"> Fast optimize</label>
+</div>
+
+<div id="jointsPanel" style="margin-top:8px;">
+  <h4>Joints</h4>
+  <div id="jointsTableWrap"></div>
+  <div style="margin-top:8px;text-align:right;">
+    <button id="applyJoints">Apply Joint Edits</button>
+  </div>
+</div>
+
+<div id="membersPanel" style="margin-top:8px;">
+  <h4>Members</h4>
+  <div class="muted">
+    Stress is +tension. Y-loads +down. L/b shown. When “Color by stress ratio” is ON:
+    tension shows SR = |σ|/σ_allow, compression shows CR = |σ|/σ_cr(L/b).
+    When OFF: member labels show axial force in N.
+  </div>
+  <div id="membersTableWrap"></div>
+  <div style="margin-top:8px;text-align:right;">
+    <button id="applyMembersBottom">Apply Members</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+  const statusEl=document.getElementById('status'), statusScoreEl=document.getElementById('statusScore');
+  const jointsTableWrap=document.getElementById('jointsTableWrap');
+  const membersTableWrap=document.getElementById('membersTableWrap');
+  const applyJointsBtn=document.getElementById('applyJoints');
+  const applyMembersBottom=document.getElementById('applyMembersBottom');
+
+  const btn=id=>document.getElementById(id);
+  const autoBtn=btn('auto'), solveBtn=btn('solve'), delBtn=btn('deleteSel'),
+        clearKeepBtn=btn('clearKeep'), saveBtn=btn('saveJson'), loadInput=btn('loadJson'),
+        colorBySREl=btn('colorBySR'), sigmaAllowEl=btn('sigmaAllow'), blockGuardEl=btn('blockGuard');
+
+  const optRunBtn=btn('optRun'), optJointsEl=btn('optJoints'), optPopEl=btn('optPop'),
+        optParentsEl=btn('optParents'), optItersEl=btn('optIters'),
+        optStepEl=btn('optStep'), optSizePEl=btn('optSizeP'), optCrossPEl=btn('optCrossP'),
+        optStagPctEl=btn('optStagPct'), fastOptEl=btn('fastOpt'), optPresetEl=btn('optPreset');
+
+  const AREAS=[27.7,37.6,46.9,58.7,73.2],
+        BS=[9.5,12.5,15.9,16.0,19.5],
+        SCOREC=[0.076,0.102,0.127,0.159,0.199];
+  const clampT=n=>Math.min(5,Math.max(1,Math.round(n)));
+
+  const L0=5.0, SIG0=250.0, c_fit=27.02104605374878, k_fit=0.17903009849966303;
+  function sigmaCR(Lb){
+    if(Lb<=L0) return SIG0;
+    if(Lb<12.5){
+      const m=(180-SIG0)/(12.5-L0), b=SIG0-m*L0;
+      return m*Lb+b;
+    }
+    return c_fit+(180-c_fit)*Math.exp(-k_fit*(Lb-12.5));
+  }
+
+  const pins=[]; let members=[]; let memberForces=null; let reactions=[];
+  let selection=new Set(); let optimizing=false;
+
+  const view={scale:1, tx:0, ty:0}, MIN_SCALE=0.25, MAX_SCALE=4;
+  const toScreen=(x,y)=>({x:x*view.scale+view.tx,y:y*view.scale+view.ty});
+  const toWorld=(sx,sy)=>({x:(sx-view.tx)/view.scale,y:(sy-view.ty)/view.scale});
+
+  let dragging=false, dragPin=-1, dragOffset={x:0,y:0};
+  let panning=false, panStart={x:0,y:0}, viewStart={tx:0,ty:0};
+  let lastSafePos=null, suppressNextClickAdd=false;
+
+  function setStatus(m){ statusEl.textContent='Status: '+m; console.log(m); }
+  function updateStatusScore(){
+    let tot=0;
+    for(let mi=0;mi<members.length;mi++){
+      const t=clampT(members[mi].t||3), L=memberLength(mi);
+      tot += L*SCOREC[t-1];
+    }
+    statusScoreEl.textContent='Score: '+tot.toFixed(1);
+    return tot;
+  }
+
+  function nearestPinIndexWorld(wx,wy,tol=12){
+    let bi=-1, bd=1e9;
+    for(let i=0;i<pins.length;i++){
+      const d=Math.hypot(pins[i].x-wx,pins[i].y-wy);
+      if(d<bd && d<=tol/view.scale){ bd=d; bi=i; }
+    }
+    return bi;
+  }
+  function segIntersect(a,b,c,d){
+    const EPS=1e-9;
+    if((a===c)||(a===d)||(b===c)||(b===d)) return false;
+    const orient=(p,q,r)=>(q.x-p.x)*(r.y-p.y)-(q.y-p.y)*(r.x-p.x);
+    const onSeg=(p,q,r)=>Math.min(p.x,r.x)<=q.x+EPS&&q.x<=Math.max(p.x,r.x)+EPS&&
+                           Math.min(p.y,r.y)<=q.y+EPS&&q.y<=Math.max(p.y,r.y)+EPS;
+    const o1=orient(a,b,c), o2=orient(a,b,d),
+          o3=orient(c,d,a), o4=orient(c,d,b);
+    if(o1*o2<0 && o3*o4<0) return true;
+    if(Math.abs(o1)<EPS && onSeg(a,c,b)) return true;
+    if(Math.abs(o2)<EPS && onSeg(a,d,b)) return true;
+    if(Math.abs(o3)<EPS && onSeg(c,a,d)) return true;
+    if(Math.abs(o4)<EPS && onSeg(c,b,d)) return true;
+    return false;
+  }
+  const memberExists=(i,k)=>members.some(m=>(m.i===i&&m.k===k)||(m.i===k&&m.k===i));
+  function addMemberIfNoCross(i,k){
+    if(memberExists(i,k)) return true;
+    const a=pins[i], b=pins[k];
+    for(const m of members){
+      if(segIntersect(a,b,pins[m.i],pins[m.k])) return false;
+    }
+    members.push({i,k,t:3});
+    return true;
+  }
+  function removeMember(i,k){
+    members=members.filter(m=>!((m.i===i&&m.k===k)||(m.i===k&&m.k===i)));
+  }
+  const memberLength=mi=>{
+    const m=members[mi], a=pins[m.i], b=pins[m.k];
+    return Math.hypot(b.x-a.x,b.y-a.y);
+  };
+
+  function ratioColorBand(r){
+    if(r<=0.95) return '#0a0';
+    if(r<=1.00) return '#ff8c00';
+    return '#b00020';
+  }
+  function stressForMember(mi){
+    if(!memberForces) return null;
+    const t=clampT(members[mi].t||3), A=AREAS[t-1];
+    return memberForces[mi]/A;
+  }
+  function sigmaCrForMember(mi){
+    if(!memberForces) return null;
+    if(memberForces[mi]>=0) return null;
+    const t=clampT(members[mi].t||3), b=BS[t-1], L=memberLength(mi), Lb=(b>0)?(L/b):1e9;
+    return sigmaCR(Lb);
+  }
+  function memberStrokeStyle(mi){
+    const F = memberForces ? memberForces[mi] : null;
+    if(!memberForces) return '#555';
+    if(colorBySREl.checked){
+      const sigma=Math.abs(stressForMember(mi)||0);
+      if(F<0){
+        const scr=sigmaCrForMember(mi) ?? Infinity;
+        const r=sigma/Math.max(1e-6,scr);
+        return ratioColorBand(r);
+      }else{
+        const sigAllow=Math.max(1e-6, parseFloat(sigmaAllowEl.value)||250);
+        const r=sigma/sigAllow;
+        return ratioColorBand(r);
+      }
+    }else{
+      if(F<0){
+        const sCr=sigmaCrForMember(mi);
+        const s=Math.abs(stressForMember(mi)||0);
+        if(sCr!==null && s>sCr) return '#d81b60';
+      }
+      if(Math.abs(F)<1e-6) return '#888';
+      return (F>0)?'#0a0':'#b00020';
+    }
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,cv.width,cv.height);
+    for(let mi=0;mi<members.length;mi++){
+      const m=members[mi], a=pins[m.i], b=pins[m.k],
+            sa=toScreen(a.x,a.y), sb=toScreen(b.x,b.y);
+      ctx.lineWidth=3;
+      ctx.strokeStyle=memberStrokeStyle(mi);
+      ctx.beginPath();
+      ctx.moveTo(sa.x,sa.y);
+      ctx.lineTo(sb.x,sb.y);
+      ctx.stroke();
+
+      if(memberForces){
+        const mx=(sa.x+sb.x)/2, my=(sa.y+sb.y)/2;
+        const F=memberForces[mi];
+        const sigma=stressForMember(mi) || 0;
+        ctx.font='11px sans-serif';
+        ctx.fillStyle=ctx.strokeStyle;
+        if(colorBySREl.checked){
+          if(F<0){
+            const scr=sigmaCrForMember(mi) || Infinity;
+            const r=Math.abs(sigma)/Math.max(1e-6,scr);
+            ctx.fillText('CR='+r.toFixed(2), mx+6, my-6);
+          }else{
+            const sigAllow=Math.max(1e-6, parseFloat(sigmaAllowEl.value)||250);
+            const r=Math.abs(sigma)/sigAllow;
+            ctx.fillText('SR='+r.toFixed(2), mx+6, my-6);
+          }
+        }else{
+          const label=(F>=0?'T ':'C ')+Math.abs(F).toFixed(0)+' N';
+          ctx.fillText(label, mx+6, my-6);
+        }
+      }
+    }
+    for(let i=0;i<pins.length;i++){
+      const p=pins[i], s=toScreen(p.x,p.y);
+      ctx.beginPath();
+      ctx.arc(s.x,s.y,6,0,Math.PI*2);
+      ctx.fillStyle=(p.support==='pin')?'blue':(p.support==='roller-y')?'orange':(p.support==='roller-x')?'#6aa7ff':'black';
+      ctx.fill();
+      ctx.lineWidth=1.5;
+      ctx.strokeStyle='#444';
+      ctx.stroke();
+      if(selection.has(i)){
+        ctx.lineWidth=3;
+        ctx.strokeStyle='#8a2be2';
+        ctx.beginPath();
+        ctx.arc(s.x,s.y,8,0,Math.PI*2);
+        ctx.stroke();
+      }
+      ctx.fillStyle='#000';
+      ctx.font='14px monospace';
+      ctx.fillText('#'+i, s.x+10, s.y-10);
+    }
+    renderJointsTable();
+    renderMembersTable();
+    updateStatusScore();
+  }
+
+  function buildAdj(){
+    const adj=Array.from({length:pins.length},()=>[]);
+    for(const m of members){ adj[m.i].push(m.k); adj[m.k].push(m.i); }
+    return adj;
+  }
+  function reactionsOnJoint(i){
+    const s=pins[i].support;
+    let rx=0,ry=0;
+    if(s==='pin'){rx=1;ry=1;}
+    else if(s==='roller-x'){rx=1;}
+    else if(s==='roller-y'){ry=1;}
+    return {rx,ry,total:rx+ry};
+  }
+  function connectedComponents(){
+    const adj=buildAdj(), seen=new Array(pins.length).fill(false), comps=[];
+    for(let i=0;i<pins.length;i++){
+      if(seen[i]) continue;
+      const st=[i], list=[];
+      seen[i]=true;
+      while(st.length){
+        const u=st.pop(); list.push(u);
+        for(const v of adj[u]) if(!seen[v]){ seen[v]=true; st.push(v); }
+      }
+      comps.push(list.sort((a,b)=>a-b));
+    }
+    const cmap=new Array(pins.length);
+    comps.forEach((l,ci)=>l.forEach(j=>cmap[j]=ci));
+    const mByC=comps.map(()=>[]);
+    members.forEach((m,mi)=>{ if(cmap[m.i]===cmap[m.k]) mByC[cmap[m.i]].push(mi); });
+    return {comps,cmap,mByC};
+  }
+  function componentsDeterminacyReport(){
+    const {comps,mByC}=connectedComponents();
+    const out=[];
+    for(let c=0;c<comps.length;c++){
+      const j=comps[c].length, m=mByC[c].length;
+      let rx=0,ry=0;
+      for(const i of comps[c]){
+        const r=reactionsOnJoint(i);
+        rx+=r.rx; ry+=r.ry;
+      }
+      out.push({c,joints:j,members:m,reactions:rx+ry,dofBalance:2*j-m-(rx+ry)});
+    }
+    return out;
+  }
+  function matrixRank(A,tol=1e-12){
+    const M=A.map(r=>r.slice());
+    const n=M.length, m=M[0].length;
+    let r=0,c=0;
+    while(r<n && c<m){
+      let piv=r,mv=Math.abs(M[r][c]);
+      for(let i=r+1;i<n;i++){
+        const v=Math.abs(M[i][c]);
+        if(v>mv){mv=v;piv=i;}
+      }
+      if(mv<=tol){ c++; continue; }
+      if(piv!==r){ const t=M[r]; M[r]=M[piv]; M[piv]=t; }
+      const pv=M[r][c];
+      for(let i=r+1;i<n;i++){
+        const f=M[i][c]/pv;
+        if(Math.abs(f)<=tol) continue;
+        for(let j=c;j<m;j++) M[i][j]-=f*M[r][j];
+      }
+      r++; c++;
+    }
+    return r;
+  }
+  function solveLinear(A,b){
+    const n=A.length, M=A.map((row,i)=>row.concat([b[i]]));
+    for(let k=0;k<n;k++){
+      let mv=Math.abs(M[k][k]), piv=k;
+      for(let i=k+1;i<n;i++){
+        const v=Math.abs(M[i][k]);
+        if(v>mv){mv=v;piv=i;}
+      }
+      if(Math.abs(M[piv][k])<1e-12) throw 'Singular';
+      if(piv!==k){ const tmp=M[k]; M[k]=M[piv]; M[piv]=tmp; }
+      for(let i=k+1;i<n;i++){
+        const f=M[i][k]/M[k][k];
+        for(let j=k;j<=n;j++) M[i][j]-=f*M[k][j];
+      }
+    }
+    const x=new Array(n).fill(0);
+    for(let i=n-1;i>=0;i--){
+      let s=M[i][n];
+      for(let j=i+1;j<n;j++) s-=M[i][j]*x[j];
+      x[i]=s/M[i][i];
+    }
+    return x;
+  }
+  function buildReactionsMap(){
+    const map=[];
+    for(let i=0;i<pins.length;i++){
+      const s=pins[i].support;
+      if(s==='pin'){ map.push([i,'x']); map.push([i,'y']); }
+      else if(s==='roller-x'){ map.push([i,'x']); }
+      else if(s==='roller-y'){ map.push([i,'y']); }
+    }
+    return map;
+  }
+
+  function solveTruss(silent=false){
+    memberForces=null; reactions=[];
+    const j=pins.length, m=members.length, reactionMap=buildReactionsMap(), r=reactionMap.length;
+
+    const rows = 2*j, cols = m+r;
+    if(rows===0 || cols===0){
+      if(!silent){ setStatus('Nothing to solve.'); draw(); }
+      return false;
+    }
+    const A=Array.from({length:rows},()=>new Array(cols).fill(0));
+    const b=new Array(rows).fill(0);
+
+    for(let i=0;i<j;i++){
+      b[2*i]=-(pins[i].load?.x||0);
+      b[2*i+1]=+(pins[i].load?.y||0);
+    }
+    for(let mi=0;mi<m;mi++){
+      const {i,k}=members[mi];
+      const xi=pins[i].x, yi=pins[i].y, xk=pins[k].x, yk=pins[k].y;
+      const L=Math.hypot(xk-xi,yk-yi);
+      if(L<1e-6){
+        if(!silent) setStatus('Zero-length member');
+        return false;
+      }
+      const cx=(xk-xi)/L, cy=(yk-yi)/L;
+      A[2*i][mi]+=cx; A[2*i+1][mi]+=cy;
+      A[2*k][mi]-=cx; A[2*k+1][mi]-=cy;
+    }
+    for(let ri=0;ri<r;ri++){
+      const [pi,dir]=reactionMap[ri];
+      const col=m+ri;
+      const row=(dir==='x')?2*pi:2*pi+1;
+      A[row][col]=1;
+    }
+
+    try{
+      const AT=Array.from({length:cols},()=>new Array(rows).fill(0));
+      for(let i=0;i<rows;i++){
+        for(let j=0;j<cols;j++) AT[j][i]=A[i][j];
+      }
+      const ATA=Array.from({length:cols},()=>new Array(cols).fill(0));
+      const ATb=new Array(cols).fill(0);
+      for(let i=0;i<cols;i++){
+        let s=0;
+        for(let k=0;k<rows;k++) s+=AT[i][k]*b[k];
+        ATb[i]=s;
+        for(let j=0;j<cols;j++){
+          let sum=0;
+          for(let k=0;k<rows;k++) sum+=AT[i][k]*A[k][j];
+          ATA[i][j]=sum;
+        }
+      }
+      const lambda=1e-8;
+      for(let i=0;i<cols;i++) ATA[i][i]+=lambda;
+      const sol=solveLinear(ATA,ATb);
+      memberForces=sol.slice(0,m);
+      const rf=sol.slice(m);
+      reactions=[];
+      for(let i=0;i<r;i++){
+        const [pi,dir]=reactionMap[i];
+        reactions.push({pin:pi,dir,value:rf[i]});
+      }
+    }catch(e){
+      if(!silent){ setStatus('Solve failed: '+e); draw(); }
+      return false;
+    }
+    if(!silent){ setStatus('Solved (positive = tension).'); draw(); }
+    return true;
+  }
+  function trySolve(){ return solveTruss(false); }
+
+  function anyMemberFails(){
+    if(!memberForces) return false;
+    const SR_ALLOW=Math.max(1e-6, parseFloat(sigmaAllowEl.value)||250);
+    for(let mi=0;mi<members.length;mi++){
+      const F=memberForces[mi];
+      const t=clampT(members[mi].t||3), A=AREAS[t-1], b=BS[t-1], L=memberLength(mi);
+      const sigma=Math.abs(F/A);
+      if(F<0){
+        const Lb=b>0?(L/b):Infinity, scr=sigmaCR(Lb);
+        if(sigma>scr+1e-6) return true;
+      }else if(F>0){
+        if(sigma>SR_ALLOW+1e-6) return true;
+      }
+    }
+    return false;
+  }
+
+  function countReactions(){
+    let r=0;
+    for(const p of pins){
+      if(p.support==='pin') r+=2;
+      else if(p.support==='roller-x'||p.support==='roller-y') r+=1;
+    }
+    return r;
+  }
+  function buildCandidates(){
+    const C=[];
+    for(let i=0;i<pins.length;i++)
+      for(let k=i+1;k<pins.length;k++)
+        C.push({i,k,dist:Math.hypot(pins[i].x-pins[k].x,pins[i].y-pins[k].y)});
+    C.sort((a,b)=>a.dist-b.dist);
+    return C;
+  }
+  function autoGenerateMembersComponentAware(){
+    if(dragging) return;
+    memberForces=null; reactions=[];
+    const j=pins.length, r=countReactions(), mTarget=Math.max(0,2*j-r);
+    const cand=buildCandidates(), chosen=[];
+    const crosses=(a,b)=>chosen.some(m=>segIntersect(a,b,pins[m.i],pins[m.k]));
+    for(const c of cand){
+      if(chosen.length>=mTarget) break;
+      const pa=pins[c.i], pb=pins[c.k];
+      if(!crosses(pa,pb)) chosen.push({i:c.i,k:c.k,t:3});
+    }
+    members=chosen;
+    let guard=0;
+    while(guard++<j*3){
+      const {comps}=connectedComponents();
+      if(comps.length<=1) break;
+      let best=null;
+      for(let a=0;a<comps.length;a++)
+        for(let b=a+1;b<comps.length;b++)
+          for(const i of comps[a])
+            for(const k of comps[b]){
+              const pa=pins[i], pb=pins[k];
+              let ok=true;
+              for(const m of members){
+                if(segIntersect(pa,pb,pins[m.i],pins[m.k])){ ok=false; break; }
+              }
+              if(!ok) continue;
+              const d=Math.hypot(pa.x-pb.x,pa.y-pb.y);
+              if(!best || d<best.d) best={i,k,d};
+            }
+      if(!best) break;
+      members.push({i:best.i,k:best.k,t:3});
+    }
+  }
+
+  function renderJointsTable(){
+    const t=document.createElement('table');
+    t.innerHTML='<thead><tr><th>#</th><th>X</th><th>Y</th><th>Support</th><th>Load X</th><th>Load Y (+down)</th><th>X-fix</th><th>Y-fix</th></tr></thead>';
+    const tb=document.createElement('tbody');
+    for(let i=0;i<pins.length;i++){
+      const p=pins[i];
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td>${i}</td>
+        <td><input data-k="x" type="number" step="0.1" value="${(p.x??0).toFixed(1)}" style="width:90px;"></td>
+        <td><input data-k="y" type="number" step="0.1" value="${(p.y??0).toFixed(1)}" style="width:90px;"></td>
+        <td><select data-k="support">
+            <option value="none"${!p.support?' selected':''}>none</option>
+            <option value="pin"${p.support==='pin'?' selected':''}>pin</option>
+            <option value="roller-x"${p.support==='roller-x'?' selected':''}>roller-x</option>
+            <option value="roller-y"${p.support==='roller-y'?' selected':''}>roller-y</option>
+          </select></td>
+        <td><input data-k="lx" type="number" step="1" value="${(p.load?.x||0)}" style="width:90px;"></td>
+        <td><input data-k="ly" type="number" step="1" value="${(p.load?.y||0)}" style="width:90px;"></td>
+        <td style="text-align:center;"><input data-k="fx" type="checkbox" ${p.fixX?'checked':''}></td>
+        <td style="text-align:center;"><input data-k="fy" type="checkbox" ${p.fixY?'checked':''}></td>`;
+      tb.appendChild(tr);
+    }
+    t.appendChild(tb);
+    jointsTableWrap.innerHTML='';
+    jointsTableWrap.appendChild(t);
+  }
+
+  function renderMembersTable(){
+    const t=document.createElement('table');
+    t.innerHTML='<thead><tr><th>#</th><th>i</th><th>k</th><th>t (1–5)</th><th>Area</th><th>b</th><th>L</th><th>L/b</th><th>Axial</th><th>Stress</th><th>SR/CR</th><th>σ_cr</th><th>Score</th></tr></thead>';
+    const tb=document.createElement('tbody');
+    for(let mi=0;mi<members.length;mi++){
+      const m=members[mi], tset=clampT(m.t||3);
+      const A=AREAS[tset-1], b=BS[tset-1], L=memberLength(mi);
+      const F=(memberForces?memberForces[mi]:null);
+      const sig=(memberForces?F/A:null);
+      const sigAllowVal=Math.max(1e-6, parseFloat(sigmaAllowEl.value)||250);
+      const Lb=(b>0)?(L/b):0;
+      const sigCr=(memberForces? sigmaCR(Lb):null);
+      const ratio = memberForces ? (F<0 ? Math.abs(sig)/(sigCr||Infinity) : Math.abs(sig)/sigAllowVal) : null;
+      const score=L*SCOREC[tset-1];
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td>${mi}</td><td>${m.i}</td><td>${m.k}</td>
+        <td><input type="number" min="1" max="5" step="1" value="${tset}" style="width:56px;"></td>
+        <td>${A.toFixed(1)}</td><td>${b.toFixed(1)}</td>
+        <td>${L.toFixed(1)}</td><td>${Lb.toFixed(2)}</td>
+        <td>${F!==null?F.toFixed(1):''}</td>
+        <td>${sig!==null?sig.toFixed(2):''}</td>
+        <td>${ratio!==null?ratio.toFixed(2):''}</td>
+        <td>${sigCr!==null?sigCr.toFixed(2):''}</td>
+        <td>${score.toFixed(1)}</td>`;
+      tb.appendChild(tr);
+    }
+    t.appendChild(tb);
+    membersTableWrap.innerHTML='';
+    membersTableWrap.appendChild(t);
+    applyMembersBottom.onclick=()=>{
+      const rows=[...t.querySelectorAll('tbody tr')];
+      for(let i=0;i<rows.length;i++){
+        const inp=rows[i].querySelector('input');
+        if(inp) members[i].t=clampT(parseInt(inp.value||'3',10));
+      }
+      trySolve();
+    };
+  }
+
+  function saveJSON(){
+    const data={
+      pins:pins.map(p=>({x:p.x,y:p.y,support:p.support,load:p.load,fixX:!!p.fixX,fixY:!!p.fixY})),
+      members:members.map(m=>({i:m.i,k:m.k,t:clampT(m.t||3)}))
+    };
+    let totScore=0;
+    for(let mi=0;mi<members.length;mi++){
+      const t=clampT(members[mi].t||3), L=memberLength(mi);
+      totScore += L*SCOREC[t-1];
+    }
+    const scoreRounded=Math.round(totScore);
+    const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download='truss_model'+scoreRounded+'.json'; a.click();
+    URL.revokeObjectURL(url);
+  }
+  async function loadJSON(file){
+    try{
+      const text=await file.text();
+      const data=JSON.parse(text);
+      pins.length=0;
+      for(const p of data.pins){
+        pins.push({
+          x:+p.x||0,
+          y:+p.y||0,
+          support:(p.support===null||p.support==='pin'||p.support==='roller-x'||p.support==='roller-y')?p.support:null,
+          load:{x:+(p.load?.x||0), y:+(p.load?.y||0)},
+          fixX:!!p.fixX,
+          fixY:!!p.fixY
+        });
+      }
+      members=data.members.map(m=>({i:+m.i,k:+m.k,t:clampT(m.t||3)}))
+        .filter(m=>Number.isInteger(m.i)&&Number.isInteger(m.k)&&m.i>=0&&m.k>=0&&m.i<pins.length&&m.k<pins.length&&m.i!==m.k);
+      memberForces=null; reactions=[];
+      draw();
+      trySolve();
+    }catch(e){
+      setStatus('Load failed');
+    }
+  }
+
+  function toggleSelect(idx){
+    if(selection.has(idx)) selection.delete(idx);
+    else selection.add(idx);
+    if(selection.size>2){
+      const first=[...selection][0];
+      selection.delete(first);
+    }
+    draw();
+    if(selection.size===2){
+      const [a,b]=[...selection];
+      if(memberExists(a,b)) removeMember(a,b);
+      else addMemberIfNoCross(a,b);
+      memberForces=null; reactions=[];
+      selection.clear();
+      trySolve();
+    }
+  }
+
+  function getWorld(ev){
+    const r=cv.getBoundingClientRect();
+    return toWorld(ev.clientX-r.left, ev.clientY-r.top);
+  }
+
+  cv.addEventListener('click',(ev)=>{
+    if(suppressNextClickAdd){ suppressNextClickAdd=false; return; }
+    const w=getWorld(ev);
+    const idx=nearestPinIndexWorld(w.x,w.y);
+    if(idx>=0){
+      if(ev.shiftKey){ toggleSelect(idx); return; }
+      if(ev.altKey){
+        const order=[null,'roller-y','roller-x','pin',null];
+        const cur=pins[idx].support||null;
+        pins[idx].support=order[(order.indexOf(cur)+1)%order.length];
+        memberForces=null; reactions=[];
+        trySolve();
+        return;
+      }
+      return;
+    }
+    if((ev.ctrlKey||ev.metaKey) && !ev.altKey && !ev.shiftKey){
+      pins.push({x:w.x,y:w.y,support:null,load:{x:0,y:0},fixX:false,fixY:false});
+      memberForces=null; reactions=[];
+      trySolve();
+    }
+  });
+  cv.addEventListener('contextmenu',(ev)=>{
+    ev.preventDefault();
+    const w=getWorld(ev);
+    const idx=nearestPinIndexWorld(w.x,w.y);
+    if(idx>=0){
+      const ly=prompt(`Vertical load at joint ${idx} (N, +down):`, String(pins[idx].load?.y||0));
+      if(ly!==null){
+        const v=parseFloat(ly);
+        if(!isNaN(v)){
+          pins[idx].load.y=v;
+          memberForces=null; reactions=[];
+          trySolve();
+        }
+      }
+    }
+  });
+
+  cv.addEventListener('mousedown',(ev)=>{
+    const r=cv.getBoundingClientRect();
+    const sx=ev.clientX-r.left, sy=ev.clientY-r.top;
+    const w=toWorld(sx,sy);
+    const idx=nearestPinIndexWorld(w.x,w.y);
+    if((ev.buttons&1) && !(ev.ctrlKey||ev.metaKey||ev.shiftKey||ev.altKey)){
+      if(idx>=0){
+        dragging=true;
+        dragPin=idx;
+        dragOffset.x=pins[idx].x-w.x;
+        dragOffset.y=pins[idx].y-w.y;
+        lastSafePos={x:pins[idx].x,y:pins[idx].y};
+      }else{
+        panning=true;
+        panStart={x:sx,y:sy};
+        viewStart={tx:view.tx,ty:view.ty};
+        cv.classList.add('dragging');
+      }
+    }
+  });
+
+  cv.addEventListener('mousemove',(ev)=>{
+    const r=cv.getBoundingClientRect();
+    const sx=ev.clientX-r.left, sy=ev.clientY-r.top;
+    if(panning){
+      view.tx=viewStart.tx+(sx-panStart.x);
+      view.ty=viewStart.ty+(sy-panStart.y);
+      draw();
+      return;
+    }
+    if(!dragging) return;
+    const w=toWorld(sx,sy);
+    const p=pins[dragPin];
+    const nx=w.x+dragOffset.x, ny=w.y+dragOffset.y;
+    if(!p.fixX) p.x=nx;
+    if(!p.fixY) p.y=ny;
+    const ok=solveTruss(true);
+    if(blockGuardEl.checked){
+      if(ok && anyMemberFails()){
+        p.x=lastSafePos.x;
+        p.y=lastSafePos.y;
+        solveTruss(true);
+        setStatus('Move blocked: member would fail.');
+      }else{
+        if(ok){
+          lastSafePos.x=p.x;
+          lastSafePos.y=p.y;
+        }
+        draw();
+      }
+    }else{
+      if(!ok) setStatus('Unsolved while moving (singular).');
+      draw();
+    }
+  });
+
+  window.addEventListener('mouseup',()=>{
+    if(dragging){
+      dragging=false;
+      dragPin=-1;
+      suppressNextClickAdd=true;
+      trySolve();
+    }
+    if(panning){
+      panning=false;
+      cv.classList.remove('dragging');
+    }
+  });
+
+  cv.addEventListener('wheel',(e)=>{
+    e.preventDefault();
+    const rect=cv.getBoundingClientRect();
+    const cx=e.clientX-rect.left, cy=e.clientY-rect.top;
+    const factor=(e.deltaY<0)?1.1:1/1.1;
+    const newScale=Math.max(MIN_SCALE, Math.min(MAX_SCALE, view.scale*factor));
+    const s=newScale/view.scale;
+    view.tx = cx - s*(cx - view.tx);
+    view.ty = cy - s*(cy - view.ty);
+    view.scale=newScale;
+    draw();
+  }, {passive:false});
+
+  solveBtn.onclick=trySolve;
+  autoBtn.onclick=()=>{ autoGenerateMembersComponentAware(); trySolve(); };
+  delBtn.onclick=()=>{
+    if(selection.size===0) return;
+    const toDel=[...selection].sort((a,b)=>b-a);
+    for(const idx of toDel){
+      members=members.filter(m=>m.i!==idx&&m.k!==idx);
+      pins.splice(idx,1);
+      for(const m of members){
+        if(m.i>idx) m.i--;
+        if(m.k>idx) m.k--;
+      }
+    }
+    selection.clear();
+    memberForces=null; reactions=[];
+    trySolve();
+  };
+  clearKeepBtn.onclick=()=>{
+    const keepIdx=new Set();
+    for(let i=0;i<pins.length;i++){
+      const p=pins[i];
+      const hasLoad=Math.abs(p.load?.x||0)>1e-9 || Math.abs(p.load?.y||0)>1e-9;
+      if(p.support==='pin'||p.support==='roller-x'||p.support==='roller-y'||hasLoad) keepIdx.add(i);
+    }
+    if(keepIdx.size===0){ setStatus('Nothing to keep.'); return; }
+    const old2new=new Map(), newPins=[];
+    for(let i=0;i<pins.length;i++){
+      if(keepIdx.has(i)){
+        old2new.set(i,newPins.length);
+        newPins.push(pins[i]);
+      }
+    }
+    pins.length=0;
+    for(const p of newPins) pins.push({...p});
+    members=members.filter(m=>keepIdx.has(m.i)&&keepIdx.has(m.k))
+                   .map(m=>({i:old2new.get(m.i),k:old2new.get(m.k),t:m.t||3}));
+    memberForces=null; reactions=[];
+    draw();
+    trySolve();
+  };
+  saveBtn.onclick=saveJSON;
+  loadInput.addEventListener('change',(e)=>{
+    const f=e.target.files[0];
+    if(f) loadJSON(f);
+    e.target.value='';
+  });
+  colorBySREl.addEventListener('change', trySolve);
+  sigmaAllowEl.addEventListener('change', trySolve);
+
+  applyJointsBtn.onclick=()=>{
+    const rows=[...jointsTableWrap.querySelectorAll('tbody tr')];
+    for(let i=0;i<rows.length;i++){
+      const inputs=[...rows[i].querySelectorAll('input,select')];
+      const p=pins[i];
+      for(const el of inputs){
+        const k=el.getAttribute('data-k');
+        if(k==='x') p.x=parseFloat(el.value)||0;
+        else if(k==='y') p.y=parseFloat(el.value)||0;
+        else if(k==='support') p.support=(el.value==='none'?null:el.value);
+        else if(k==='lx'){ p.load=p.load||{x:0,y:0}; p.load.x=parseFloat(el.value)||0; }
+        else if(k==='ly'){ p.load=p.load||{x:0,y:0}; p.load.y=parseFloat(el.value)||0; }
+        else if(k==='fx') p.fixX=el.checked;
+        else if(k==='fy') p.fixY=el.checked;
+      }
+    }
+    memberForces=null; reactions=[];
+    trySolve();
+  };
+
+  const PRESETS={
+    fast:{it:200,pop:24,parents:8,step:12,sizeP:0.15,crossP:0.60,stag:40},
+    refine:{it:800,pop:36,parents:12,step:8,sizeP:0.10,crossP:0.45,stag:50},
+    thorough:{it:2000,pop:48,parents:18,step:6,sizeP:0.08,crossP:0.35,stag:60},
+    max:{it:5000,pop:64,parents:24,step:5,sizeP:0.06,crossP:0.30,stag:70}
+  };
+  function applyPreset(name){
+    const p=PRESETS[name]||PRESETS.fast;
+    optItersEl.value=p.it;
+    optPopEl.value=p.pop;
+    optParentsEl.value=p.parents;
+    optStepEl.value=p.step;
+    optSizePEl.value=p.sizeP;
+    optCrossPEl.value=p.crossP;
+    optStagPctEl.value=p.stag;
+  }
+  optPresetEl.onchange=()=>applyPreset(optPresetEl.value);
+  applyPreset('fast');
+
+  function runOptimization(){
+    const J=pins.length;
+    optJointsEl.value=J;
+
+    const POP=Math.max(6,Math.min(200,parseInt(optPopEl.value||'24',10)));
+    const PARENTS=Math.max(2,Math.min(POP-1,parseInt(optParentsEl.value||'8',10)));
+    const ITERS=Math.max(1,Math.min(5000,parseInt(optItersEl.value||'200',10)));
+    const POS_MUT_STD=Math.max(1,Math.min(100,parseFloat(optStepEl.value||'12')));
+    const SIZE_MUT_PROB=Math.max(0,Math.min(1,parseFloat(optSizePEl.value||'0.15')));
+    const CROSS_P=Math.max(0,Math.min(1,parseFloat(optCrossPEl.value||'0.60')));
+    const SR_ALLOW=Math.max(1e-6,parseFloat(sigmaAllowEl.value)||250);
+    const STAG_PCT=Math.max(5,Math.min(100,parseFloat(optStagPctEl.value||'40')));
+    const fast=fastOptEl.checked;
+
+    const movableIdx=[];
+    for(let i=0;i<pins.length;i++){
+      if(pins[i].fixX && pins[i].fixY) continue;
+      movableIdx.push(i);
+    }
+    if(movableIdx.length===0){ setStatus('No movable joints for optimisation.'); return; }
+
+    function clampVal(v,lo,hi){ return Math.max(lo,Math.min(hi,v)); }
+    function randn(){
+      const u=1-Math.random(), v=1-Math.random();
+      return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);
+    }
+
+    const MFREE=movableIdx.length;
+    const initCoord=new Float64Array(2*MFREE);
+    for(let k=0;k<MFREE;k++){
+      const idx=movableIdx[k];
+      initCoord[2*k]=pins[idx].x;
+      initCoord[2*k+1]=pins[idx].y;
+    }
+
+    function setMovableCoordsFrom(indCoords){
+      for(let k=0;k<MFREE;k++){
+        const idx=movableIdx[k];
+        const x=indCoords[2*k], y=indCoords[2*k+1];
+        if(!pins[idx].fixX) pins[idx].x=x;
+        if(!pins[idx].fixY) pins[idx].y=y;
+      }
+    }
+
+    function randomInd(){
+      const c=initCoord.slice();
+      for(let i=0;i<c.length;i++){
+        const isX=i%2===0;
+        c[i]=clampVal(c[i]+randn()*POS_MUT_STD,0,isX?cv.width:cv.height);
+      }
+      const sizes=new Int8Array(members.length);
+      for(let i=0;i<sizes.length;i++) sizes[i]=1+(Math.random()*5|0);
+      return {coords:c,sizes};
+    }
+
+    function mutate(ind){
+      const c=ind.coords.slice();
+      for(let i=0;i<c.length;i++){
+        const isX=i%2===0;
+        c[i]=clampVal(c[i]+randn()*POS_MUT_STD,0,isX?cv.width:cv.height);
+      }
+      const s=new Int8Array(ind.sizes);
+      for(let i=0;i<s.length;i++)
+        if(Math.random()<SIZE_MUT_PROB)
+          s[i]=Math.max(1,Math.min(5,s[i]+(Math.random()<0.5?-1:1)));
+      return {coords:c,sizes:s};
+    }
+    function crossover(a,b){
+      const c=a.coords.slice();
+      for(let i=0;i<c.length;i++) if(Math.random()<CROSS_P) c[i]=b.coords[i];
+      const s=new Int8Array(members.length);
+      for(let i=0;i<s.length;i++)
+        s[i]=(Math.random()<0.5?(i<a.sizes.length?a.sizes[i]:3):(i<b.sizes.length?b.sizes[i]:3));
+      return {coords:c,sizes:s};
+    }
+
+    function evaluate(ind){
+      const c=ind.coords;
+      for(let i=0;i<c.length;i++){
+        const isX=i%2===0;
+        c[i]=clampVal(c[i],0,isX?cv.width:cv.height);
+      }
+      setMovableCoordsFrom(c);
+      for(let mi=0;mi<members.length;mi++)
+        members[mi].t=Math.max(1,Math.min(5,ind.sizes[mi]||3));
+      const ok=solveTruss(true);
+      if(!ok) return {cost:1e12,feasible:false};
+
+      let cost=0,pen=0,bonus=0;
+      const MIN_L = 100;
+      const MIN_NODE_DIST = 50;
+
+      for(let mi=0;mi<members.length;mi++){
+        const t=clampT(members[mi].t||3), A=AREAS[t-1], b=BS[t-1], L=memberLength(mi), F=memberForces[mi], sigma=F/A;
+        const Lb=(b>0)?(L/b):1e9, sigmaCrVal=(F<0)?sigmaCR(Lb):Infinity;
+
+        if(L<MIN_L) pen += 1e6*(MIN_L-L);
+        if(Math.abs(sigma)>SR_ALLOW) pen+=1e6*(Math.abs(sigma)-SR_ALLOW);
+        if(F<0 && Math.abs(sigma)>sigmaCrVal) pen+=1e6*(Math.abs(sigma)-sigmaCrVal);
+
+        const base = L*SCOREC[t-1];
+        cost += base;
+
+        let cap = SR_ALLOW;
+        if(F<0) cap = Math.min(SR_ALLOW, sigmaCrVal);
+        const util = Math.min(1, Math.abs(sigma)/Math.max(1e-6,cap));
+        const thickFactor = (t-1)/4;
+        bonus += 0.1 * base * util * thickFactor;
+      }
+
+      for(let i=0;i<pins.length;i++){
+        for(let k=i+1;k<pins.length;k++){
+          const dx=pins[i].x-pins[k].x;
+          const dy=pins[i].y-pins[k].y;
+          const d=Math.hypot(dx,dy);
+          if(d<MIN_NODE_DIST) pen += 5e5*(MIN_NODE_DIST-d);
+        }
+      }
+
+      for(let mi=0;mi<members.length;mi++){
+        const ma=members[mi];
+        const a1=pins[ma.i], a2=pins[ma.k];
+        for(let mj=mi+1;mj<members.length;mj++){
+          const mb=members[mj];
+          const b1=pins[mb.i], b2=pins[mb.k];
+          if(segIntersect(a1,a2,b1,b2)){
+            pen += 1e7;
+          }
+        }
+      }
+
+      return {cost:cost+pen-bonus,feasible:pen===0};
+    }
+
+    function sleepFrame(){ return new Promise(r=>requestAnimationFrame(()=>r())); }
+
+    (async ()=>{
+      optimizing=true;
+      setStatus('Optimization: init…');
+
+      let pop=Array.from({length:POP},randomInd).map(ind=>({ind,fit:evaluate(ind)}));
+      pop.sort((a,b)=>a.fit.cost-b.fit.cost);
+      let best={ind:pop[0].ind,fit:pop[0].fit};
+      let noImprove=0, lastBest=best.fit.cost;
+      const patience=Math.max(1,Math.floor(ITERS*STAG_PCT/100));
+
+      for(let it=0; it<ITERS; it++){
+        const parents=pop.slice(0, Math.min(PARENTS,pop.length));
+        const kids=[];
+        while(kids.length<POP){
+          const a=parents[Math.random()*parents.length|0].ind;
+          const b=parents[Math.random()*parents.length|0].ind;
+          let child=crossover(a,b);
+          if(Math.random()<0.8) child=mutate(child);
+          kids.push({ind:child,fit:evaluate(child)});
+        }
+        pop=parents.concat(kids).sort((a,b)=>a.fit.cost-b.fit.cost).slice(0,POP);
+        if(pop[0].fit.cost < best.fit.cost-1e-6) best={ind:pop[0].ind,fit:pop[0].fit};
+
+        if(best.fit.cost < lastBest-1e-6){ lastBest=best.fit.cost; noImprove=0; }
+        else noImprove++;
+
+        const msg=`Optimization ${it+1}/${ITERS} — best objective ${best.fit.cost.toFixed(1)}${best.fit.feasible?' ✓':''}`;
+        if(fast){
+          if(it%5===0) statusEl.textContent='Status: '+msg;
+        }else{
+          statusEl.textContent='Status: '+msg;
+          draw();
+        }
+        if(noImprove>=patience){
+          statusEl.textContent=`Status: Early stop (no improvement for ${patience} iters)`;
+          break;
+        }
+        await sleepFrame();
+      }
+
+      setMovableCoordsFrom(best.ind.coords);
+      for(let mi=0;mi<members.length;mi++)
+        members[mi].t=Math.max(1,Math.min(5,best.ind.sizes[mi]||3));
+      optimizing=false;
+      trySolve();
+      const finalScore=updateStatusScore();
+      setStatus(`Optimization done — score ${finalScore.toFixed(1)}${best.fit.feasible?' (feasible)':''}`);
+    })();
+  }
+  optRunBtn.onclick=runOptimization;
+
+  function seed(){
+    const data = {
+      pins: [{"x":25,"y":45,"support":"pin","load":{"x":0,"y":0},"fixX":true,"fixY":true},{"x":25,"y":300,"support":"roller-x","load":{"x":0,"y":0},"fixX":true,"fixY":true},{"x":840,"y":153.41927256375135,"support":null,"load":{"x":0,"y":-2700},"fixX":true,"fixY":false},{"x":306.0114443907691,"y":278.3371528332735,"support":null,"load":{"x":0,"y":0},"fixX":false,"fixY":false},{"x":455.95273056015026,"y":82.24771320986062,"support":null,"load":{"x":0,"y":0},"fixX":false,"fixY":false},{"x":518.6921229997934,"y":221.32338505359513,"support":null,"load":{"x":0,"y":0},"fixX":false,"fixY":false}],
+      members: [{"i":2,"k":5,"t":5},{"i":3,"k":4,"t":1},{"i":0,"k":3,"t":1},{"i":0,"k":1,"t":1},{"i":4,"k":5,"t":1},{"i":1,"k":3,"t":5},{"i":2,"k":4,"t":1},{"i":0,"k":4,"t":1},{"i":3,"k":5,"t":3}]
+    };
+    pins.length=0;
+    for(const p of data.pins){
+      pins.push({
+        x:+p.x||0,
+        y:+p.y||0,
+        support:(p.support===null||p.support==='pin'||p.support==='roller-x'||p.support==='roller-y')?p.support:null,
+        load:{x:+(p.load?.x||0), y:+(p.load?.y||0)},
+        fixX:!!p.fixX,
+        fixY:!!p.fixY
+      });
+    }
+    members=data.members.map(m=>({i:+m.i,k:+m.k,t:clampT(m.t||3)}))
+      .filter(m=>Number.isInteger(m.i)&&Number.isInteger(m.k)&&m.i>=0&&m.k>=0&&m.i<pins.length&&m.k<pins.length&&m.i!==m.k);
+    memberForces=null; reactions=[];
+    trySolve();
+  }
+  seed();
+})();
+</script>
+</body>
+</html>
