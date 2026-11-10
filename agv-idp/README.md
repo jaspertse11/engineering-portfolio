@@ -32,8 +32,8 @@ The code is in the team repository, [IDP-repo (branch `rear_bay_detect`, `V3.5/s
 
 ## What I built by hand
 
-- Soldered and desoldered on the sensor board, and traced an output LED fault to a failed opto-isolator a few days before the final competition.
-- Laser-cut the prototype chassis.
+- Assembled the robot (including grabber) when printed parts were ready for same day testing and full calibration
+- Worked with the electrical sub-team on soldering and desoldering on the sensor board, and traced an output LED fault to a failed opto-isolator a few days before the final competition.
 - Worked with the mechanical sub-team on the grabber design and on bringing the robot under the weight limit after the prototype came in overweight.
 
 ## What went wrong
@@ -45,6 +45,6 @@ The code is in the team repository, [IDP-repo (branch `rear_bay_detect`, `V3.5/s
 
 ## If I did this again
 
-- Set the integration date a week earlier and treat it as fixed, because testing time was what separated the first run from the final.
-- Add a simple distance estimate from the motor timing so turns depend less on hand-tuned constants.
+- Set the integration date a day earlier and treat it as fixed, because testing time was what separated the first run from the final.
+- Put more thoughts into mechanical design choices, such as distance sensor placement at the front would greatly simplify bay check sequence
 - Fix edge cases found in testing instead of hoping the run avoids them.
