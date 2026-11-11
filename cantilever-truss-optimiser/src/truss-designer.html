@@ -1058,9 +1058,10 @@
   optRunBtn.onclick=runOptimization;
 
   function seed(){
+    // Default layout: the design we built, truss_model254.json (see models/final-design/).
     const data = {
-      pins: [{"x":25,"y":45,"support":"pin","load":{"x":0,"y":0},"fixX":true,"fixY":true},{"x":25,"y":300,"support":"roller-x","load":{"x":0,"y":0},"fixX":true,"fixY":true},{"x":840,"y":153.41927256375135,"support":null,"load":{"x":0,"y":-2700},"fixX":true,"fixY":false},{"x":306.0114443907691,"y":278.3371528332735,"support":null,"load":{"x":0,"y":0},"fixX":false,"fixY":false},{"x":455.95273056015026,"y":82.24771320986062,"support":null,"load":{"x":0,"y":0},"fixX":false,"fixY":false},{"x":518.6921229997934,"y":221.32338505359513,"support":null,"load":{"x":0,"y":0},"fixX":false,"fixY":false}],
-      members: [{"i":2,"k":5,"t":5},{"i":3,"k":4,"t":1},{"i":0,"k":3,"t":1},{"i":0,"k":1,"t":1},{"i":4,"k":5,"t":1},{"i":1,"k":3,"t":5},{"i":2,"k":4,"t":1},{"i":0,"k":4,"t":1},{"i":3,"k":5,"t":3}]
+      pins: [{"x":25,"y":45,"support":"pin","load":{"x":0,"y":0},"fixX":true,"fixY":true},{"x":25,"y":300,"support":"roller-x","load":{"x":0,"y":0},"fixX":true,"fixY":true},{"x":842.3,"y":282.7961861667314,"support":null,"load":{"x":0,"y":-1350},"fixX":true,"fixY":false},{"x":350.6,"y":173.3,"support":null,"load":{"x":0,"y":0},"fixX":true,"fixY":true},{"x":549.5,"y":322.9,"support":null,"load":{"x":0,"y":0},"fixX":true,"fixY":true},{"x":287.3,"y":311.5,"support":null,"load":{"x":0,"y":0},"fixX":true,"fixY":true},{"x":589.0240274431598,"y":222.334630075787,"support":null,"load":{"x":0,"y":0},"fixX":false,"fixY":false}],
+      members: [{"i":4,"k":6,"t":1},{"i":3,"k":5,"t":1},{"i":3,"k":6,"t":1},{"i":2,"k":6,"t":1},{"i":0,"k":1,"t":1},{"i":4,"k":5,"t":3},{"i":1,"k":5,"t":3},{"i":2,"k":4,"t":3},{"i":0,"k":3,"t":1},{"i":1,"k":3,"t":1},{"i":4,"k":3,"t":1}]
     };
     pins.length=0;
     for(const p of data.pins){

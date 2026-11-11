@@ -11,7 +11,7 @@ Second-year Engineering student at the University of Cambridge (Pembroke College
 | [ABS/GOX hybrid engine](abs-gox-hybrid-engine/) | Personal project with my twin brother on a fully 3D-printed ABS hybrid engine sized for 25 N and a 5 s burn, with a printed rig for leak tests | Design stage, with component tests |
 | [Cantilever truss optimiser](cantilever-truss-optimiser/) | Pair project: browser-based truss solver and evolutionary optimiser; the built truss buckled at 550 N | Complete, with post-mortem |
 | [Autonomous guided vehicle (IDP)](agv-idp/) | Won the final competition (1st of 12 teams); project sub-lead, wrote most of the MicroPython on an RP2040 robot | Complete, Nov 2026 |
-| [Magnetometer (IEP)](magnetometer/) | Analogue magnetic-field indicator built from an isolation amplifier and op-amp comparators, with demo clip | Complete |
+| [Magnetometer (IEP)](magnetometer/) | Analogue magnetic-field indicator: sensor, buffer op-amp and a comparator ladder driving LEDs, with demo clip | Complete |
 | [Past-paper practice app](past-paper-app/) | Python/Tkinter app, built with AI assistance, that splits exam PDFs into questions, times attempts and logs scores | Core working; statistics and recommendations in development |
 | [Flood warning system](flood-warning-system/) | Python dataset handling and curve fitting to predict water levels | Complete |
 | [Mars lander](mars-lander/) | C++ and introductory control theory | Complete |
